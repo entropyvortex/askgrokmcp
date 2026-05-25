@@ -28,7 +28,7 @@
     "test": "NODE_TEST=1 node --test grok-mcp.test.mjs"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.27.1"
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "engines": {
     "node": ">=18.0.0"
