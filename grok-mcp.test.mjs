@@ -237,8 +237,12 @@ describe("toolHandlers", () => {
     assert.equal(typeof toolHandlers.grok_consensus, "function");
   });
 
-  it("has exactly 4 handlers", () => {
-    assert.equal(Object.keys(toolHandlers).length, 4);
+  it("maps grok_validate to a function", () => {
+    assert.equal(typeof toolHandlers.grok_validate, "function");
+  });
+
+  it("has exactly 5 handlers", () => {
+    assert.equal(Object.keys(toolHandlers).length, 5);
   });
 });
 

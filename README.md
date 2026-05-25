@@ -18,6 +18,7 @@ Ask Grok questions, generate images with Aurora, run multi-round consensus analy
 | `generate_image` | Generate images using Grok's Aurora model and save them locally |
 | `list_models` | List all xAI models available to your account |
 | `grok_consensus` | Run a full Consensus Validation Protocol (CVP) for deep, multi-round analysis |
+| `grok_validate` | Run a rigorous multi-round Validation Protocol on any artifact (code, plan, prompt, PR) with scorecard + improved version |
 
 ## Built-in Protocols
 
@@ -34,6 +35,20 @@ The `grok_consensus` tool implements a structured, multi-round analysis protocol
 The entire protocol executes server-side in a single tool call. Each round builds on the full conversation history for genuine iterative refinement.
 
 **Default:** 3 rounds | **Max:** 10 rounds | [Full protocol documentation](protocols/consensus-validation.md)
+
+### Validation Protocol
+
+The `grok_validate` tool runs a rigorous, multi-round quality gate on any artifact — code, plans, research, prompts, PR descriptions, architectures. Grok produces a scored scorecard (correctness, completeness, innovation/risk, clarity, best practices), identifies critical issues, and returns an improved version ready to copy-paste.
+
+```
+> grok_validate with artifact is [paste your plan or code here]
+> grok_validate with artifact is [auth module] criteria is security, input validation rubric is security-focused
+> grok_validate with artifact is [your plan] reference is [original output] rounds is 6 rubric is strict
+```
+
+Supports four rubric presets: `balanced` (default), `strict`, `innovative`, and `security-focused`. An optional `reference` argument enables side-by-side comparison with another model's output.
+
+**Default:** 5 rounds | **Max:** 10 rounds
 
 ---
 
@@ -150,8 +165,8 @@ At startup the server probes the xAI `/models` endpoint and selects the best ava
 
 | Purpose | Frontier (preferred) | Fallback |
 |---------|---------------------|----------|
-| Chat | `grok-4.20-0309-reasoning` | `grok-3-fast` |
-| Image generation | `grok-imagine-image-pro` | `grok-2-image` |
+| Chat | `grok-4.3` | `grok-4.3` |
+| Image generation | `grok-imagine-image-quality` | `grok-imagine-image-quality` |
 
 If the frontier model is not available on your account, the server automatically falls back to the safe default.
 
@@ -201,8 +216,8 @@ claude mcp add grok \
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `XAI_API_KEY` | *(required)* | Your xAI API key |
-| `GROK_CHAT_MODEL` | `grok-3-fast` | Default model for `ask_grok` and `grok_consensus` |
-| `GROK_IMAGE_MODEL` | `grok-2-image` | Default model for `generate_image` |
+| `GROK_CHAT_MODEL` | `grok-4.3` | Default model for `ask_grok`, `grok_consensus`, and `grok_validate` |
+| `GROK_IMAGE_MODEL` | `grok-imagine-image-quality` | Default model for `generate_image` |
 | `SAFE_WRITE_BASE_DIR` | `process.cwd()` | Base directory for image writes |
 | `XAI_REQUEST_TIMEOUT_MS` | `30000` | Timeout per xAI API request in milliseconds |
 | `XAI_MAX_RETRIES` | `2` | Number of retries for transient errors (429/5xx/network/timeout) |

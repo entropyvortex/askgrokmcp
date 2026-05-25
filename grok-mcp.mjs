@@ -10,12 +10,13 @@
  * - generate_image:  Generate images using Grok's Aurora model and save them locally.
  * - list_models:     List all models available to your xAI account.
  * - grok_consensus:  Run a full Consensus Validation Protocol (CVP) with Grok.
+ * - grok_validate:   Run a rigorous Validation Protocol on any artifact with scorecard + improved version.
  *
  * Model selection (highest priority wins):
  *   1. Per-call `model` argument
  *   2. GROK_CHAT_MODEL / GROK_IMAGE_MODEL environment variables
- *   3. Frontier defaults (grok-4.20-0309-reasoning / grok-imagine-image-pro)
- *   4. Fallback defaults (grok-3-fast / grok-2-image)
+ *   3. Frontier defaults (grok-4.3 / grok-imagine-image-quality)
+ *   4. Fallback defaults (grok-4.3 / grok-imagine-image-quality)
  *
  * @see https://modelcontextprotocol.io
  * @see https://docs.x.ai/api
@@ -36,12 +37,12 @@ import { getToolDefinitions, createToolHandlers } from "./src/tools.js";
 const XAI_API_BASE = "https://api.x.ai/v1";
 
 /** Frontier models — used when available and no env override is set. */
-const FRONTIER_CHAT_MODEL  = "grok-4.20-0309-reasoning";
-const FRONTIER_IMAGE_MODEL = "grok-imagine-image-pro";
+const FRONTIER_CHAT_MODEL  = "grok-4.3";
+const FRONTIER_IMAGE_MODEL = "grok-imagine-image-quality";
 
 /** Fallback models — used when frontier models are not available. */
-const FALLBACK_CHAT_MODEL  = "grok-3-fast";
-const FALLBACK_IMAGE_MODEL = "grok-2-image";
+const FALLBACK_CHAT_MODEL  = "grok-4.3";
+const FALLBACK_IMAGE_MODEL = "grok-imagine-image-quality";
 
 /**
  * Active defaults. Env vars take top priority; otherwise resolved at startup
@@ -429,12 +430,13 @@ export {
 };
 
 // Re-export individual handlers for backwards-compatible test access.
-const { ask_grok, generate_image, list_models, grok_consensus } = toolHandlers;
+const { ask_grok, generate_image, list_models, grok_consensus, grok_validate } = toolHandlers;
 export {
   ask_grok    as handleAskGrok,
   generate_image as handleGenerateImage,
   list_models    as handleListModels,
   grok_consensus as handleGrokConsensus,
+  grok_validate  as handleGrokValidate,
 };
 
 // -- Utility functions -------------------------------------------------------

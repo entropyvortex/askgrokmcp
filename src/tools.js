@@ -213,7 +213,133 @@ export function getToolDefinitions({ chatModel, imageModel }) {
         required: ["topic"],
       },
     },
+    {
+      name: "grok_validate",
+      description:
+        "Runs a rigorous Validation Protocol on any artifact (code, plan, research, prompt, PR, architecture, etc.). " +
+        "Produces a scored scorecard, identifies weaknesses, and returns an improved version. " +
+        "Use this as your mandatory quality gate before shipping complex work. " +
+        `Default model: ${chatModel}.`,
+      inputSchema: {
+        type: "object",
+        properties: {
+          artifact: {
+            type: "string",
+            description: "The artifact to validate (code, plan, research output, prompt, PR description, etc.)",
+          },
+          criteria: {
+            type: "string",
+            description: "Optional focus areas or custom evaluation criteria (e.g. 'security, performance, maintainability')",
+          },
+          reference: {
+            type: "string",
+            description: "Optional reference output from another model for side-by-side comparison",
+          },
+          rounds: {
+            type: "number",
+            description: "Number of validation rounds (1-10, default 5). Higher = deeper analysis.",
+          },
+          rubric: {
+            type: "string",
+            enum: ["balanced", "strict", "innovative", "security-focused"],
+            description: "Evaluation style preset (default: balanced)",
+          },
+        },
+        required: ["artifact"],
+      },
+    },
   ];
+}
+
+// -- Validation Protocol -----------------------------------------------------
+
+const VALIDATE_DEFAULT_ROUNDS = 5;
+const VALIDATE_MAX_ROUNDS = 10;
+
+const VALIDATION_SYSTEM_PROMPT =
+  "You are participating in a rigorous Validation Protocol powered by Grok. " +
+  "Your role is to act as an independent, high-standard quality gate. " +
+  "Be thorough, objective, and constructive. Always acknowledge uncertainty. " +
+  "Never be sycophantic. Your goal is to make the final output materially better.";
+
+function validationRoundPrompt(artifact, round, total, criteria, reference, rubric) {
+  const rubricText = {
+    balanced: "balanced evaluation across correctness, completeness, innovation, risk, and best practices",
+    strict: "extremely strict — flag every potential issue, edge case, or ambiguity",
+    innovative: "emphasize novelty, creativity, and forward-looking improvements while maintaining rigor",
+    "security-focused": "heavy emphasis on security, privacy, attack surface, and compliance",
+  }[rubric] || "balanced evaluation";
+
+  if (round === 1) {
+    return (
+      `Round ${round}/${total} — Initial Validation\n\n` +
+      `Artifact to validate:\n\n${artifact}\n\n` +
+      (criteria ? `Focus criteria: ${criteria}\n\n` : "") +
+      (reference ? `Reference output for comparison:\n\n${reference}\n\n` : "") +
+      `Perform a ${rubricText}. Identify key strengths, critical weaknesses, missing elements, and risks.`
+    );
+  }
+
+  if (round === total) {
+    return (
+      `Round ${round}/${total} — Final Synthesis & Improved Version\n\n` +
+      `Synthesize all previous rounds into:\n` +
+      `1. A clear scorecard (Correctness, Completeness, Innovation/Risk, Clarity, Best Practices — each scored 1-10 with rationale)\n` +
+      `2. Top 3-5 critical issues with severity\n` +
+      `3. A fully improved version of the original artifact (ready to copy-paste)\n` +
+      `4. Your overall confidence and recommended next actions.\n\n` +
+      `Be definitive where evidence supports it.`
+    );
+  }
+
+  const strategies = [
+    `Round ${round}/${total} — Counterarguments & Blind Spots\n\n` +
+      `Critically challenge your own previous analysis. What are the strongest counterarguments or overlooked risks? Where might you be overconfident?`,
+    `Round ${round}/${total} — Evidence & Edge Cases\n\n` +
+      `Assess evidence quality for every claim. Explore edge cases, failure modes, regional/temporal factors, and long-term consequences.`,
+    `Round ${round}/${total} — Comparison & Alternative Approaches\n\n` +
+      (reference ? `Compare the artifact against the reference output. Which is stronger and why? ` : "") +
+      `Propose superior alternative approaches or architectures.`,
+  ];
+  return strategies[(round - 2) % strategies.length];
+}
+
+function formatValidationResult(artifact, rounds, roundResults, model, criteria, rubric) {
+  const lines = [
+    `## Grok Validation Protocol — Results`,
+    ``,
+    `| Field              | Value |`,
+    `|--------------------|-------|`,
+    `| **Artifact Type**  | ${artifact.length > 80 ? "Long document / code" : "Short text"} |`,
+    `| **Rounds**         | ${rounds} |`,
+    `| **Model**          | ${model} |`,
+    `| **Rubric**         | ${rubric || "balanced"} |`,
+    criteria ? `| **Focus**          | ${criteria} |` : "",
+    ``,
+    `### Executive Scorecard`,
+    ``,
+    `| Dimension              | Score (1-10) | Rationale |`,
+    `|------------------------|--------------|-----------|`,
+    `| Correctness            | —            | (filled by Grok in final round) |`,
+    `| Completeness           | —            | |`,
+    `| Innovation / Risk      | —            | |`,
+    `| Clarity & Communication| —            | |`,
+    `| Best Practices         | —            | |`,
+    `| **Overall**            | —            | |`,
+    ``,
+  ];
+
+  for (const r of roundResults) {
+    lines.push(`### Round ${r.round}`);
+    lines.push(``);
+    lines.push(r.content);
+    lines.push(``);
+  }
+
+  lines.push(`---`);
+  lines.push(`**Next step recommendation**: Copy the improved version below into your workflow and re-validate if needed.`);
+
+  return lines.join("\n");
 }
 
 // -- Tool handlers -----------------------------------------------------------
@@ -457,6 +583,58 @@ export function createToolHandlers(ctx) {
     return { content: [{ type: "text", text }] };
   }
 
+  // -- grok_validate ---------------------------------------------------------
+
+  async function handleGrokValidate(args) {
+    if (!args || typeof args.artifact !== "string" || !args.artifact.trim()) {
+      throw new Error("Invalid arguments: 'artifact' must be a non-empty string");
+    }
+    if (args.artifact.length > config.maxPromptLength) {
+      throw new Error(
+        `Artifact too long: ${args.artifact.length} chars exceeds the ${config.maxPromptLength} char limit`,
+      );
+    }
+    if (
+      args.rounds != null &&
+      (!Number.isInteger(args.rounds) || args.rounds < 1 || args.rounds > VALIDATE_MAX_ROUNDS)
+    ) {
+      throw new Error(
+        `Invalid arguments: 'rounds' must be an integer between 1 and ${VALIDATE_MAX_ROUNDS}`,
+      );
+    }
+    if (args.rubric && !["balanced", "strict", "innovative", "security-focused"].includes(args.rubric)) {
+      throw new Error("Invalid arguments: 'rubric' must be one of: balanced, strict, innovative, security-focused");
+    }
+
+    const artifact = args.artifact.trim();
+    const numRounds = args.rounds ?? VALIDATE_DEFAULT_ROUNDS;
+    const model = config.chatModel;
+    const rubric = args.rubric || "balanced";
+    const criteria = args.criteria?.trim() || null;
+    const reference = args.reference?.trim() || null;
+
+    const messages = [{ role: "system", content: VALIDATION_SYSTEM_PROMPT }];
+    const roundResults = [];
+
+    for (let round = 1; round <= numRounds; round++) {
+      const userPrompt = validationRoundPrompt(artifact, round, numRounds, criteria, reference, rubric);
+      messages.push({ role: "user", content: userPrompt });
+
+      const data = await xaiPost("/chat/completions", {
+        model,
+        messages,
+        temperature: 0.65,
+      });
+
+      const content = data?.choices?.[0]?.message?.content ?? "No response";
+      messages.push({ role: "assistant", content });
+      roundResults.push({ round, content });
+    }
+
+    const text = formatValidationResult(artifact, numRounds, roundResults, model, criteria, rubric);
+    return { content: [{ type: "text", text }] };
+  }
+
   // -- Handler map -----------------------------------------------------------
 
   return {
@@ -464,5 +642,6 @@ export function createToolHandlers(ctx) {
     generate_image: handleGenerateImage,
     list_models: handleListModels,
     grok_consensus: handleGrokConsensus,
+    grok_validate: handleGrokValidate,
   };
 }
