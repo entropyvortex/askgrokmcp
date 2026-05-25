@@ -6,7 +6,7 @@
   "author": "Marcelo Ceccon",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/marceloceccon/askgrokmcp.git"
+    "url": "git+https://github.com/entropyvortex/askgrokmcp.git"
   },
   "type": "module",
   "main": "grok-mcp.mjs",
