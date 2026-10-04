@@ -2,8 +2,11 @@
  * Tool definitions and handlers for the Grok MCP Server.
  *
  * This module owns all MCP tool schemas and their implementation.
- * The main server module provides the HTTP client and configuration.
+ * The main server module provides the HTTP client, the optional grok CLI
+ * client, and configuration.
  */
+
+import { cliModelArg, parseModelList } from "./cli-backend.js";
 
 // -- Consensus Validation Protocol -------------------------------------------
 
@@ -85,17 +88,21 @@ function formatConsensusResult(topic, rounds, roundResults, model) {
  * Returns the MCP tool schema array. Called on each ListTools request
  * so descriptions always reflect the current resolved model names.
  *
- * @param {{ chatModel: string, imageModel: string }} config
+ * @param {{ chatModel: string, imageModel: string, backend?: string }} config
  * @returns {Array<object>}
  */
-export function getToolDefinitions({ chatModel, imageModel }) {
+export function getToolDefinitions({ chatModel, imageModel, backend = "api" }) {
+  const cli = backend === "cli";
   return [
     {
       name: "ask_grok",
       description:
         "Ask Grok a question and get a response. " +
         `Default model: ${chatModel}. ` +
-        "Supports system prompts and sampling parameters (temperature, max_tokens, top_p). " +
+        (cli
+          ? "Runs through the signed-in grok CLI and uses the Grok subscription. " +
+            "temperature, max_tokens, and top_p are unavailable on this backend. "
+          : "Supports system prompts and sampling parameters (temperature, max_tokens, top_p). ") +
         "Run list_models to see all available model options.",
       inputSchema: {
         type: "object",
@@ -136,10 +143,13 @@ export function getToolDefinitions({ chatModel, imageModel }) {
     },
     {
       name: "generate_image",
-      description:
-        "Generate an image using Grok's Aurora image model and save it to a local file. " +
-        `Default model: ${imageModel}. ` +
-        "Use the optional 'model' parameter to use a different image model.",
+      description: cli
+        ? "Generate an image with Imagine through the signed-in grok CLI and save it locally. " +
+          "Uses the Grok subscription. The model argument selects the chat model that calls Imagine, " +
+          "not an image model id. There is no video tool."
+        : "Generate an image using Grok's Aurora image model and save it to a local file. " +
+          `Default model: ${imageModel}. ` +
+          "Use the optional 'model' parameter to use a different image model.",
       inputSchema: {
         type: "object",
         properties: {
@@ -169,10 +179,13 @@ export function getToolDefinitions({ chatModel, imageModel }) {
     },
     {
       name: "list_models",
-      description:
-        "List all xAI models available to your account, including their IDs and capabilities. " +
-        "Use this to discover which models you can pass to ask_grok or generate_image. " +
-        "You can also filter by type: 'chat' for language models or 'image' for image generation.",
+      description: cli
+        ? "List chat models available to the signed-in grok CLI. " +
+          "Image generation uses Imagine and does not appear as its own model id. " +
+          "Filter 'image' explains that. Filter 'chat' or 'all' lists CLI chat models."
+        : "List all xAI models available to your account, including their IDs and capabilities. " +
+          "Use this to discover which models you can pass to ask_grok or generate_image. " +
+          "You can also filter by type: 'chat' for language models or 'image' for image generation.",
       inputSchema: {
         type: "object",
         properties: {
@@ -193,8 +206,9 @@ export function getToolDefinitions({ chatModel, imageModel }) {
       name: "grok_consensus",
       description:
         "Runs a full iterative Consensus Validation Protocol (CVP) between Claude and Grok. " +
-        "Returns a structured final summary. Default 3-5 rounds. " +
-        "Supports custom round count via the 'rounds' argument.",
+        "Returns a structured final summary. Default 3 rounds, maximum 10. " +
+        "Supports custom round count via the 'rounds' argument." +
+        (cli ? " Each round is a separate grok CLI turn against the subscription." : ""),
       inputSchema: {
         type: "object",
         properties: {
@@ -219,7 +233,8 @@ export function getToolDefinitions({ chatModel, imageModel }) {
         "Runs a rigorous Validation Protocol on any artifact (code, plan, research, prompt, PR, architecture, etc.). " +
         "Produces a scored scorecard, identifies weaknesses, and returns an improved version. " +
         "Use this as your mandatory quality gate before shipping complex work. " +
-        `Default model: ${chatModel}.`,
+        `Default model: ${chatModel}.` +
+        (cli ? " Each round is a separate grok CLI turn against the subscription." : ""),
       inputSchema: {
         type: "object",
         properties: {
@@ -342,6 +357,43 @@ function formatValidationResult(artifact, rounds, roundResults, model, criteria,
   return lines.join("\n");
 }
 
+/**
+ * Formats `grok models` output for the list_models tool.
+ *
+ * @param {string} stdout
+ * @param {string} filter
+ * @returns {{ content: Array<{ type: string, text: string }> }}
+ */
+function formatCliModelList(stdout, filter) {
+  const imagineNote =
+    "Image generation uses Imagine through the grok CLI. It is not a model id in this list. Call generate_image.";
+
+  if (filter === "image") {
+    return { content: [{ type: "text", text: imagineNote }] };
+  }
+
+  const { models } = parseModelList(stdout);
+  if (models.length === 0) {
+    const raw = String(stdout ?? "").trim();
+    return {
+      content: [{ type: "text", text: raw || "grok models returned no output." }],
+    };
+  }
+
+  const lines = [
+    `${models.length} chat model(s) available to the signed-in grok CLI:`,
+    "",
+  ];
+  for (const model of models) {
+    lines.push(`  ${model.id}  [chat]${model.isDefault ? " <- grok CLI default" : ""}`);
+  }
+  if (filter === "all") {
+    lines.push("", imagineNote);
+  }
+  lines.push("", "To use one model for a call: pass model=\"<id>\" to ask_grok.");
+  return { content: [{ type: "text", text: lines.join("\n") }] };
+}
+
 // -- Tool handlers -----------------------------------------------------------
 
 /**
@@ -350,23 +402,69 @@ function formatValidationResult(artifact, rounds, roundResults, model, criteria,
  * @param {object} ctx
  * @param {Function} ctx.xaiPost  - Authenticated POST to xAI API.
  * @param {Function} ctx.xaiGet   - Authenticated GET from xAI API.
+ * @param {Function} [ctx.cli]    - Subscription CLI client used when config.backend is "cli".
  * @param {Function} ctx.safeWrite - Safe file writer.
  * @param {Function} ctx.buildFilePath - Multi-image path builder.
  * @param {Function} ctx.downloadBuffer - URL downloader.
  * @param {Function} ctx.resolve - path.resolve.
- * @param {object}   ctx.config  - Mutable config object with chatModel, imageModel, etc.
+ * @param {object}   ctx.config  - Mutable config object with chatModel, imageModel, backend, etc.
  * @returns {Record<string, Function>}
  */
 export function createToolHandlers(ctx) {
   const {
     xaiPost,
     xaiGet,
+    cli,
     safeWrite,
     buildFilePath,
     downloadBuffer,
     resolve,
     config,
   } = ctx;
+
+  const useCli = () => config.backend === "cli";
+
+  function promptFromMessages(messages) {
+    const dialogue = messages.filter((message) => message.role !== "system");
+    if (dialogue.length === 1 && dialogue[0].role === "user") {
+      return dialogue[0].content;
+    }
+    const transcript = dialogue
+      .map((message) => {
+        const role = message.role === "assistant" ? "Assistant" : "User";
+        return `${role}:\n${message.content}`;
+      })
+      .join("\n\n");
+    return `${transcript}\n\nRespond to the latest User message. Use the earlier turns as context.`;
+  }
+
+  async function completeChat(messages, { model, temperature, maxTokens, topP } = {}) {
+    if (useCli()) {
+      if (!cli?.complete) {
+        throw new Error("GROK_BACKEND=cli but the grok CLI client is not configured");
+      }
+      const systemPrompt = messages
+        .filter((message) => message.role === "system")
+        .map((message) => message.content)
+        .join("\n\n");
+      return cli.complete({
+        prompt: promptFromMessages(messages),
+        systemPrompt,
+        model: cliModelArg(model, config.chatModel),
+      });
+    }
+
+    const requestBody = { model: model || config.chatModel, messages };
+    if (typeof temperature === "number") requestBody.temperature = temperature;
+    if (typeof maxTokens === "number") requestBody.max_tokens = maxTokens;
+    if (typeof topP === "number") requestBody.top_p = topP;
+
+    const data = await xaiPost("/chat/completions", requestBody);
+    const messageContent = data?.choices?.[0]?.message?.content;
+    if (typeof messageContent === "string") return messageContent;
+    if (messageContent != null) return JSON.stringify(messageContent);
+    return "No response";
+  }
 
   // -- ask_grok --------------------------------------------------------------
 
@@ -377,6 +475,15 @@ export function createToolHandlers(ctx) {
     if (args.prompt.length > config.maxPromptLength) {
       throw new Error(
         `Prompt too long: ${args.prompt.length} chars exceeds the ${config.maxPromptLength} char limit`,
+      );
+    }
+
+    if (
+      useCli() &&
+      (args.temperature != null || args.max_tokens != null || args.top_p != null)
+    ) {
+      throw new Error(
+        "temperature, max_tokens, and top_p are unavailable when GROK_BACKEND=cli",
       );
     }
 
@@ -391,20 +498,12 @@ export function createToolHandlers(ctx) {
     }
     messages.push({ role: "user", content: args.prompt });
 
-    const requestBody = { model, messages };
-    if (typeof args.temperature === "number") requestBody.temperature = args.temperature;
-    if (typeof args.max_tokens === "number") requestBody.max_tokens = args.max_tokens;
-    if (typeof args.top_p === "number") requestBody.top_p = args.top_p;
-
-    const data = await xaiPost("/chat/completions", requestBody);
-
-    const messageContent = data?.choices?.[0]?.message?.content;
-    const text =
-      typeof messageContent === "string"
-        ? messageContent
-        : messageContent != null
-          ? JSON.stringify(messageContent)
-          : "No response";
+    const text = await completeChat(messages, {
+      model,
+      temperature: args.temperature,
+      maxTokens: args.max_tokens,
+      topP: args.top_p,
+    });
     return { content: [{ type: "text", text }] };
   }
 
@@ -431,6 +530,36 @@ export function createToolHandlers(ctx) {
       typeof args.model === "string" && args.model.trim()
         ? args.model.trim()
         : config.imageModel;
+
+    if (useCli()) {
+      if (!cli?.generateImages) {
+        throw new Error("GROK_BACKEND=cli but the grok CLI client is not configured");
+      }
+      const imageModelRequested = /image|imagine|aurora/i.test(model);
+      const agentModel = cliModelArg(
+        imageModelRequested ? undefined : args.model,
+        config.chatModel,
+      );
+      const images = await cli.generateImages({
+        prompt: args.prompt,
+        n,
+        agentModel,
+      });
+      const saved = [];
+      for (let i = 0; i < images.length; i++) {
+        const dest = buildFilePath(args.file_path, i, images.length);
+        await safeWrite(dest, images[i].bytes);
+        saved.push(dest);
+      }
+      const lines = [
+        `Generated and saved ${saved.length} image(s) with Imagine:`,
+        saved.join("\n"),
+      ];
+      if (images.length < n) {
+        lines.push("", `Requested ${n}, Imagine returned ${images.length}.`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    }
 
     const data = await xaiPost("/images/generations", {
       model,
@@ -472,6 +601,13 @@ export function createToolHandlers(ctx) {
     const filter = args?.filter ?? "all";
     if (!["all", "chat", "image"].includes(filter)) {
       throw new Error("Invalid arguments: 'filter' must be 'all', 'chat', or 'image'");
+    }
+
+    if (useCli()) {
+      if (!cli?.listModels) {
+        throw new Error("GROK_BACKEND=cli but the grok CLI client is not configured");
+      }
+      return formatCliModelList(await cli.listModels(), filter);
     }
 
     const data = await xaiGet("/models");
@@ -568,13 +704,7 @@ export function createToolHandlers(ctx) {
       const userPrompt = cvpRoundPrompt(topic, round, numRounds);
       messages.push({ role: "user", content: userPrompt });
 
-      const data = await xaiPost("/chat/completions", {
-        model,
-        messages,
-        temperature: 0.7,
-      });
-
-      const content = data?.choices?.[0]?.message?.content ?? "No response";
+      const content = await completeChat(messages, { model, temperature: 0.7 });
       messages.push({ role: "assistant", content });
       roundResults.push({ round, content });
     }
@@ -620,13 +750,7 @@ export function createToolHandlers(ctx) {
       const userPrompt = validationRoundPrompt(artifact, round, numRounds, criteria, reference, rubric);
       messages.push({ role: "user", content: userPrompt });
 
-      const data = await xaiPost("/chat/completions", {
-        model,
-        messages,
-        temperature: 0.65,
-      });
-
-      const content = data?.choices?.[0]?.message?.content ?? "No response";
+      const content = await completeChat(messages, { model, temperature: 0.65 });
       messages.push({ role: "assistant", content });
       roundResults.push({ round, content });
     }

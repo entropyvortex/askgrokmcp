@@ -1,0 +1,16 @@
+{
+  "name": "askgrokmcp",
+  "description": "Grok subscription tools for Claude Code",
+  "owner": {
+    "name": "Marcelo Ceccon",
+    "url": "https://github.com/marceloceccon"
+  },
+  "plugins": [
+    {
+      "name": "askgrok",
+      "source": ".",
+      "description": "Ask Grok and generate images with Imagine through the grok CLI, using your Grok subscription.",
+      "version": "1.6.0"
+    }
+  ]
+}
