@@ -1,7 +1,7 @@
 {
   "name": "askgrokmcp",
-  "version": "1.5.0",
-  "description": "MCP server that exposes xAI's Grok API as tools for Claude Code",
+  "version": "1.6.0",
+  "description": "MCP server and Claude Code plugin that exposes Grok through the xAI API or the grok CLI subscription",
   "license": "MIT",
   "author": "Marcelo Ceccon",
   "repository": {
@@ -29,7 +29,7 @@
   "scripts": {
     "start": "node grok-mcp.mjs",
     "check": "node --check grok-mcp.mjs",
-    "test": "NODE_TEST=1 node --test grok-mcp.test.mjs"
+    "test": "NODE_TEST=1 node --test grok-mcp.test.mjs src/cli-backend.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0"
