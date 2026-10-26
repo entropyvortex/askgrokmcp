@@ -3,16 +3,20 @@
 /**
  * Grok MCP Server
  *
- * A Model Context Protocol (MCP) server that exposes xAI's Grok API
- * as tools for AI assistants like Claude Code. Provides four capabilities:
+ * A Model Context Protocol (MCP) server that exposes Grok as tools for
+ * assistants like Claude Code. Provides five capabilities:
  *
  * - ask_grok:        Send prompts to Grok and receive text responses.
- * - generate_image:  Generate images using Grok's Aurora model and save them locally.
- * - list_models:     List all models available to your xAI account.
+ * - generate_image:  Generate images and save them locally.
+ * - list_models:     List models available to the active backend.
  * - grok_consensus:  Run a full Consensus Validation Protocol (CVP) with Grok.
  * - grok_validate:   Run a rigorous Validation Protocol on any artifact with scorecard + improved version.
  *
- * Model selection (highest priority wins):
+ * GROK_BACKEND selects the meter:
+ *   - api (default): HTTPS to api.x.ai with XAI_API_KEY (prepaid API credits).
+ *   - cli: the signed-in `grok` CLI (Grok subscription, including Imagine).
+ *
+ * Model selection on the API backend (highest priority wins):
  *   1. Per-call `model` argument
  *   2. GROK_CHAT_MODEL / GROK_IMAGE_MODEL environment variables
  *   3. Frontier defaults (grok-4.3 / grok-imagine-image-quality)
@@ -31,6 +35,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { getToolDefinitions, createToolHandlers } from "./src/tools.js";
+import { checkCliReady, createCliClient } from "./src/cli-backend.js";
 
 // -- Configuration -----------------------------------------------------------
 
@@ -44,12 +49,15 @@ const FRONTIER_IMAGE_MODEL = "grok-imagine-image-quality";
 const FALLBACK_CHAT_MODEL  = "grok-4.3";
 const FALLBACK_IMAGE_MODEL = "grok-imagine-image-quality";
 
+const BACKEND = parseBackend(process.env.GROK_BACKEND);
+
 /**
  * Active defaults. Env vars take top priority; otherwise resolved at startup
  * by probing the xAI /models endpoint (frontier -> fallback).
+ * The CLI backend leaves the model unset so the signed-in grok CLI picks it.
  */
-let CHAT_MODEL  = process.env.GROK_CHAT_MODEL  ?? FRONTIER_CHAT_MODEL;
-let IMAGE_MODEL = process.env.GROK_IMAGE_MODEL ?? FRONTIER_IMAGE_MODEL;
+let CHAT_MODEL  = process.env.GROK_CHAT_MODEL  ?? (BACKEND === "cli" ? "grok CLI default" : FRONTIER_CHAT_MODEL);
+let IMAGE_MODEL = process.env.GROK_IMAGE_MODEL ?? (BACKEND === "cli" ? "Imagine" : FRONTIER_IMAGE_MODEL);
 
 const MAX_PROMPT_LENGTH     = 128_000;
 const MAX_IMAGE_VARIATIONS  = 10;
@@ -58,7 +66,7 @@ const MAX_RETRIES           = parseNonNegativeIntEnv("XAI_MAX_RETRIES",         
 const RETRY_BASE_DELAY_MS   = parsePositiveIntEnv("XAI_RETRY_BASE_DELAY_MS",   500);
 const LOG_REQUESTS          = parseBooleanEnv("LOG_REQUESTS",          false);
 const LOG_REQUEST_PAYLOADS  = parseBooleanEnv("LOG_REQUEST_PAYLOADS",  false);
-const SERVER_VERSION        = "1.4.0";
+const SERVER_VERSION        = "1.6.0";
 
 const SAFE_WRITE_BASE_DIR = process.env.SAFE_WRITE_BASE_DIR;
 if (SAFE_WRITE_BASE_DIR && !isAbsolute(SAFE_WRITE_BASE_DIR)) {
@@ -69,7 +77,7 @@ const WRITE_BASE_DIR = SAFE_WRITE_BASE_DIR ? resolve(SAFE_WRITE_BASE_DIR) : proc
 
 const API_KEY = process.env.XAI_API_KEY;
 const __testing = process.env.NODE_TEST === "1";
-if (!API_KEY && !__testing) {
+if (BACKEND === "api" && !API_KEY && !__testing) {
   console.error("Missing XAI_API_KEY environment variable");
   process.exit(1);
 }
@@ -80,9 +88,22 @@ if (!API_KEY && !__testing) {
 const config = {
   get chatModel()  { return CHAT_MODEL; },
   get imageModel() { return IMAGE_MODEL; },
+  get backend()    { return BACKEND; },
   maxPromptLength:    MAX_PROMPT_LENGTH,
   maxImageVariations: MAX_IMAGE_VARIATIONS,
 };
+
+const cliClient = BACKEND === "cli"
+  ? createCliClient({
+      bin: process.env.GROK_BIN || "grok",
+      textTimeoutMs: parsePositiveIntEnv("GROK_CLI_TIMEOUT_MS", 120_000),
+      imageTimeoutMs: parsePositiveIntEnv("GROK_CLI_IMAGE_TIMEOUT_MS", 180_000),
+      textMaxTurns: parsePositiveIntEnv("GROK_CLI_MAX_TURNS", 2),
+      log: (event, fields) => {
+        if (LOG_REQUESTS) logEvent(event, fields);
+      },
+    })
+  : null;
 
 // -- Helpers -----------------------------------------------------------------
 
@@ -288,6 +309,7 @@ function buildFilePath(basePath, index, total) {
 const toolHandlers = createToolHandlers({
   xaiPost,
   xaiGet,
+  cli: cliClient,
   safeWrite,
   buildFilePath,
   downloadBuffer,
@@ -367,7 +389,11 @@ if (!__testing) {
   );
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
-    tools: getToolDefinitions({ chatModel: CHAT_MODEL, imageModel: IMAGE_MODEL }),
+    tools: getToolDefinitions({
+      chatModel: CHAT_MODEL,
+      imageModel: IMAGE_MODEL,
+      backend: BACKEND,
+    }),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
@@ -413,7 +439,21 @@ if (!__testing) {
     }
   });
 
-  await resolveDefaults();
+  if (BACKEND === "cli") {
+    const ready = await checkCliReady({ bin: process.env.GROK_BIN || "grok" });
+    if (!ready.ok) {
+      console.error(ready.message);
+      process.exit(1);
+    }
+    if (process.env.XAI_API_KEY || process.env.GROK_CODE_XAI_API_KEY) {
+      console.error(
+        "GROK_BACKEND=cli: API key environment variables are removed from grok child processes. Usage follows the grok login session.",
+      );
+    }
+    logEvent("backend", { backend: "cli", version: ready.version || undefined });
+  } else {
+    await resolveDefaults();
+  }
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -440,6 +480,14 @@ export {
 };
 
 // -- Utility functions -------------------------------------------------------
+
+function parseBackend(raw) {
+  if (raw == null || raw.trim() === "") return "api";
+  const value = raw.trim().toLowerCase();
+  if (value === "api" || value === "cli") return value;
+  console.error('GROK_BACKEND must be "api" or "cli"');
+  process.exit(1);
+}
 
 function parseBooleanEnv(name, defaultValue) {
   const raw = process.env[name];
