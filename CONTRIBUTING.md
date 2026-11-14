@@ -15,6 +15,7 @@ npm install
 
 ```bash
 node --check grok-mcp.mjs
+npm test
 ```
 
 ## Code guidelines

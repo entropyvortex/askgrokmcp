@@ -4,9 +4,16 @@
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that brings xAI's Grok API into [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as native tools.
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) server that brings Grok into [Claude Code](https://docs.anthropic.com/en/docs/claude-code) as native tools.
 
-Ask Grok questions, generate images with Aurora, run multi-round consensus analysis, and explore available models — directly from your terminal.
+Two backends:
+
+| Backend | Meter | Set with |
+|---------|--------|----------|
+| xAI API | Prepaid API credits | `GROK_BACKEND=api` (default) and `XAI_API_KEY` |
+| `grok` CLI | The Grok subscription, including Imagine | `GROK_BACKEND=cli` after `grok login` |
+
+Ask Grok questions, generate images, run multi-round consensus analysis, and explore available models — directly from your terminal. The CLI backend generates images with Imagine. It does not generate video.
 
 ---
 
@@ -15,7 +22,7 @@ Ask Grok questions, generate images with Aurora, run multi-round consensus analy
 | Tool | Description |
 |------|-------------|
 | `ask_grok` | Send a prompt to Grok with optional system prompt and sampling parameters |
-| `generate_image` | Generate images using Grok's Aurora model and save them locally |
+| `generate_image` | Generate images and save them locally. The API backend calls Aurora. The CLI backend calls Imagine |
 | `list_models` | List all xAI models available to your account |
 | `grok_consensus` | Run a full Consensus Validation Protocol (CVP) for deep, multi-round analysis |
 | `grok_validate` | Run a rigorous multi-round Validation Protocol on any artifact (code, plan, prompt, PR) with scorecard + improved version |
@@ -56,7 +63,8 @@ Supports four rubric presets: `balanced` (default), `strict`, `innovative`, and 
 
 - **Node.js** >= 18
 - **Claude Code** CLI installed
-- **xAI API key** — get one at [console.x.ai](https://console.x.ai)
+- **API backend:** an xAI API key from [console.x.ai](https://console.x.ai)
+- **CLI backend:** the [grok CLI](https://x.ai/cli) and a completed `grok login`
 
 ## Setup
 
@@ -90,7 +98,31 @@ Replace `/path/to/askgrokmcp` with the actual path where you cloned the reposito
 
 ---
 
-Replace `your_api_key_here` with your xAI API key in either option. That's it — the tools are now available in Claude Code.
+Replace `your_api_key_here` with your xAI API key in either option. That's it — the tools are now available in Claude Code and bill API credits.
+
+### Option C: Claude Code plugin (subscription)
+
+Use this when you want text and Imagine images to draw from the Grok subscription instead of API credits.
+
+```bash
+git clone https://github.com/marceloceccon/askgrokmcp.git
+cd askgrokmcp
+npm install
+grok login
+```
+
+From Claude Code, add this repository as a marketplace and install the plugin:
+
+```text
+/plugin marketplace add /path/to/askgrokmcp
+/plugin install askgrok@askgrokmcp
+```
+
+The plugin starts `bin/plugin-start.mjs` with `GROK_BACKEND=cli`. On a fresh checkout that has no `node_modules`, the launcher runs `npm install` once. Its output stays on stderr.
+
+`XAI_API_KEY` in the environment is removed from the `grok` child process, so a key used by other tools does not switch these calls onto API credits.
+
+`temperature`, `max_tokens`, and `top_p` belong to the API backend. The CLI backend rejects them. Imagine chooses the image model. Pass `model` to `ask_grok` to select a chat model from `list_models`.
 
 ## Usage
 
@@ -215,14 +247,19 @@ claude mcp add grok \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `XAI_API_KEY` | *(required)* | Your xAI API key |
-| `GROK_CHAT_MODEL` | `grok-4.3` | Default model for `ask_grok`, `grok_consensus`, and `grok_validate` |
-| `GROK_IMAGE_MODEL` | `grok-imagine-image-quality` | Default model for `generate_image` |
+| `GROK_BACKEND` | `api` | `api` calls api.x.ai. `cli` runs the signed-in `grok` CLI |
+| `XAI_API_KEY` | *(required for `api`)* | xAI API key. Ignored for `grok` child processes when the backend is `cli` |
+| `GROK_BIN` | `grok` | CLI binary used when `GROK_BACKEND=cli` |
+| `GROK_CHAT_MODEL` | `grok-4.3` on `api`, CLI default on `cli` | Default model for `ask_grok`, `grok_consensus`, and `grok_validate` |
+| `GROK_IMAGE_MODEL` | `grok-imagine-image-quality` | Image model for the API backend. The CLI backend uses Imagine |
+| `GROK_CLI_TIMEOUT_MS` | `120000` | Timeout for a text or `grok models` CLI call |
+| `GROK_CLI_IMAGE_TIMEOUT_MS` | `180000` | Base timeout for Imagine. Each extra image adds 60 seconds, up to 15 minutes |
+| `GROK_CLI_MAX_TURNS` | `2` | Turn cap for text CLI calls |
 | `SAFE_WRITE_BASE_DIR` | `process.cwd()` | Base directory for image writes |
 | `XAI_REQUEST_TIMEOUT_MS` | `30000` | Timeout per xAI API request in milliseconds |
 | `XAI_MAX_RETRIES` | `2` | Number of retries for transient errors (429/5xx/network/timeout) |
 | `XAI_RETRY_BASE_DELAY_MS` | `500` | Base delay for exponential retry backoff |
-| `LOG_REQUESTS` | `false` | Logs tool/xAI request metadata to stderr |
+| `LOG_REQUESTS` | `false` | Logs tool and backend request metadata to stderr |
 | `LOG_REQUEST_PAYLOADS` | `false` | Includes full request payloads in logs (use carefully) |
 
 ## Request logging
@@ -248,22 +285,31 @@ export LOG_REQUEST_PAYLOADS=true
 
 ```
 askgrokmcp/
-  grok-mcp.mjs          Server entry point, config, HTTP client
-  src/tools.js           Tool definitions and handler implementations
-  protocols/             Protocol documentation
+  grok-mcp.mjs                 Server entry point, config, HTTP client
+  bin/plugin-start.mjs         Claude Code plugin launcher (GROK_BACKEND=cli)
+  .claude-plugin/plugin.json   Plugin manifest
+  .claude-plugin/marketplace.json
+  skills/ask-grok/SKILL.md     When to call ask, consensus, validate, or Imagine
+  src/tools.js                 Tool definitions and handlers
+  src/cli-backend.js           grok CLI subscription backend
+  protocols/                   Protocol documentation
     consensus-validation.md
-  grok-mcp.test.mjs     Test suite
+  grok-mcp.test.mjs            API-path test suite
+  src/cli-backend.test.mjs     CLI backend test suite
 ```
 
 ## How it works
 
-This server implements the MCP protocol over stdio. When Claude Code starts, it launches the server as a subprocess and communicates with it via JSON-RPC over stdin/stdout. The server translates MCP tool calls into xAI API requests and returns the results.
+This server implements the MCP protocol over stdio. When Claude Code starts, it launches the server as a subprocess and communicates with it via JSON-RPC over stdin/stdout. The server translates MCP tool calls into either xAI API requests or a headless `grok` CLI run.
 
 ```mermaid
 flowchart LR
     A[Claude Code] -- stdio --> B[grok-mcp.mjs]
     B -- HTTPS --> C[xAI API]
+    B -- grok CLI --> D[Grok subscription]
 ```
+
+On the CLI backend, text tools run `grok` with tools denied and a one-directory scratch pad, so the coding agent does not edit the project. `generate_image` runs `grok` with only the `image_gen` tool inside a temporary directory, then copies the image through the same path sandbox as the API backend. Multi-round tools send the transcript so far on each turn.
 
 For the `grok_consensus` tool, the server manages a multi-round conversation loop with Grok internally, returning the complete analysis in a single response:
 
